@@ -1,0 +1,18 @@
+# arista_ceos should be installed.
+name: switch_3_clab
+
+topology:
+  nodes:
+    srl:
+      kind: nokia_srlinux
+      image: ghcr.io/nokia/srlinux:24.10
+    ceos:
+      kind: arista_ceos
+      image: ceos:4.35.0F
+    mtr1:
+      kind: vr-ros
+      image: docker.io/iparchitechs/chr:stable
+
+  links:
+    - endpoints: ["srl:ethernet-1/1", "ceos:eth1"]
+    - endpoints: ["mtr1:eth1", "srl:ethernet-1/2"]
