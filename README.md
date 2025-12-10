@@ -1,5 +1,3 @@
-# NetCrafter
-
 """
 Модуль для сбора информации о версиях ПО с сетевых коммутаторов через SSH.
 
@@ -16,6 +14,7 @@
 import subprocess
 import yaml
 import re
+import socket
 from typing import List, Dict, Tuple
 from datetime import datetime
 
@@ -39,6 +38,7 @@ def check_sshpass_installed() -> bool:
         )
         return result.returncode == 0
     except Exception:
+        print('sshpass не установлен в системе')
         return False
 
 
@@ -57,19 +57,23 @@ def connect_via_ssh(host: str, username: str, password: str, command: str) -> st
     
     Returns:
         Вывод команды в виде строки или сообщение об ошибке
-    
-    Note:
-        В production-среде рекомендуется использовать SSH-ключи вместо паролей
-        и не отключать проверку ключей хоста.
     """
     try:
+        # Проверяем формат IP-адреса если это IP, а не доменное имя
+        if re.match(r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$', host):
+            # Проверяем корректность IP-адреса
+            parts = host.split('.')
+            for part in parts:
+                if int(part) > 255:
+                    return f"ОШИБКА: Неправильный IP-адрес {host} (число больше 255)"
+        
         # Формируем команду SSH с использованием sshpass для передачи пароля
         ssh_command = [
             "sshpass", "-p", password,
             "ssh",
             "-o", "StrictHostKeyChecking=no",    # Отключаем проверку ключей хоста
             "-o", "UserKnownHostsFile=/dev/null", # Не сохраняем ключи в known_hosts
-            "-o", "ConnectTimeout=30",           # Таймаут подключения 30 секунд
+            "-o", "ConnectTimeout=10",           # Таймаут подключения 10 секунд
             "-o", "PasswordAuthentication=yes",  # Разрешаем аутентификацию по паролю
             f"{username}@{host}",
             command
@@ -80,7 +84,7 @@ def connect_via_ssh(host: str, username: str, password: str, command: str) -> st
             ssh_command,
             capture_output=True,
             text=True,
-            timeout=30,  # Общий таймаут 30 секунд
+            timeout=15,  # Общий таймаут 15 секунд
             encoding='utf-8',
             errors='ignore'  # Игнорируем ошибки кодировки
         )
@@ -91,19 +95,58 @@ def connect_via_ssh(host: str, username: str, password: str, command: str) -> st
             # Анализируем сообщение об ошибке для лучшей диагностики
             error_msg = result.stderr.lower()
             
-            if "permission denied" in error_msg:
-                return f"ОШИБКА: Неверный логин или пароль для {host}"
+            # 1. Ошибка при неправильном пароле
+            if "permission denied" in error_msg or "authentication failed" in error_msg:
+                return f"ОШИБКА: Неправильный пароль для пользователя '{username}' на устройстве {host}"
+            
+            # 2. Ошибка при неправильном имени пользователя  
+            elif "invalid user" in error_msg or "unknown user" in error_msg:
+                return f"ОШИБКА: Неправильное имя пользователя '{username}' на устройстве {host}"
+            
+            # 3. Ошибка при неправильном IP адресе (DNS ошибка)
+            elif "name or service not known" in error_msg or "could not resolve hostname" in error_msg:
+                return f"ОШИБКА: Неправильный IP-адрес или имя хоста '{host}' (не удалось найти устройство)"
+            
+            # 4. Ошибка при недоступном устройстве
             elif "connection refused" in error_msg:
-                return f"ОШИБКА: Не удалось подключиться к {host} (порт 22 закрыт)"
-            elif "connection timed out" in error_msg:
-                return f"ОШИБКА: Таймаут подключения к {host}"
-            elif "no route to host" in error_msg:
-                return f"ОШИБКА: Нет маршрута до {host}"
+                return f"ОШИБКА: Не удалось подключиться к {host} (порт 22 закрыт или устройство выключено)"
+            
+            # 5. Ошибка при таймауте подключения
+            elif "connection timed out" in error_msg or "operation timed out" in error_msg:
+                return f"ОШИБКА: Таймаут подключения к {host} (устройство не отвечает)"
+            
+            # 6. Ошибка "нет маршрута до хоста"
+            elif "no route to host" in error_msg or "host is unreachable" in error_msg:
+                return f"ОШИБКА: Нет маршрута до устройства {host} (сетевая проблема)"
+            
+            # 7. Ошибка при сбросе соединения
+            elif "connection reset by peer" in error_msg:
+                return f"ОШИБКА: Устройство {host} разорвало соединение"
+            
+            # 8. Другие ошибки SSH
+            elif "ssh protocol error" in error_msg:
+                return f"ОШИБКА: Ошибка протокола SSH при подключении к {host}"
+            
+            # 9. Ошибка при отсутствии поддержки аутентификации по паролю
+            elif "no supported authentication methods" in error_msg:
+                return f"ОШИБКА: Устройство {host} не поддерживает аутентификацию по паролю"
+            
+            # 10. Общая ошибка SSH
             else:
-                return f"ОШИБКА SSH: {result.stderr[:100].strip()}"
+                # Пытаемся извлечь понятное сообщение об ошибке
+                error_lines = result.stderr.strip().split('\n')
+                for line in error_lines:
+                    if line and not line.startswith('Warning:'):
+                        return f"ОШИБКА SSH: {line[:150]}"
+                
+                return f"ОШИБКА: Неизвестная ошибка при подключении к {host}"
                 
     except subprocess.TimeoutExpired:
         return f"ОШИБКА: Превышено время ожидания при подключении к {host}"
+    
+    except FileNotFoundError:
+        return f"ОШИБКА: Не найден ssh или sshpass клиент. Убедитесь, что они установлены."
+    
     except Exception as e:
         return f"ОШИБКА: Непредвиденная ошибка при подключении к {host}: {str(e)}"
 
@@ -123,8 +166,39 @@ def get_device_version(host: str, username: str, password: str) -> str:
     Returns:
         Вывод команды show version или сообщение об ошибке
     """
+    # Сначала проверяем базовую доступность устройства
+    try:
+        # Проверяем формат IP-адреса
+        if re.match(r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$', host):
+            parts = host.split('.')
+            for part in parts:
+                if int(part) > 255:
+                    return f"ОШИБКА: Неправильный IP-адрес {host} (часть адреса больше 255)"
+        
+        # Быстрая проверка доступности порта 22
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(3)
+        result = sock.connect_ex((host, 22))
+        sock.close()
+        
+        if result != 0:
+            return f"ОШИБКА: Порт 22 на устройстве {host} закрыт или недоступен"
+            
+    except ValueError:
+        return f"ОШИБКА: Неправильный формат IP-адреса {host}"
+    
+    except socket.gaierror:
+        return f"ОШИБКА: Неправильный IP-адрес или имя хоста '{host}' (DNS ошибка)"
+    
+    except socket.timeout:
+        # Продолжаем попытку подключения, даже если проверка порта таймаутила
+        pass
+    
+    except Exception as e:
+        # Продолжаем попытку подключения при других ошибках проверки
+        pass
+    
     # Список возможных команд для получения информации о версии
-    # Упорядочен от наиболее распространенных к менее распространенным
     version_commands = [
         "show version",           # Стандартная команда для Cisco, Arista
         "show version | no-more", # Для устройств с пагинацией (Nokia SR Linux)
@@ -134,6 +208,8 @@ def get_device_version(host: str, username: str, password: str) -> str:
         "cat /etc/os-release",    # Для Linux-подобных систем
     ]
     
+    last_error = ""
+    
     for command in version_commands:
         output = connect_via_ssh(host, username, password, command)
         
@@ -141,6 +217,7 @@ def get_device_version(host: str, username: str, password: str) -> str:
         # и содержит достаточное количество данных
         if (output and 
             not output.startswith("ОШИБКА") and
+            not output.startswith("ssh: ") and
             len(output.strip()) > 20):  # Минимальная длина валидного вывода
             
             # Обрезаем слишком длинный вывод для удобства
@@ -148,9 +225,14 @@ def get_device_version(host: str, username: str, password: str) -> str:
                 output = output[:5000] + "\n\n...[вывод обрезан, слишком длинный]..."
             
             return output
+        elif output and (output.startswith("ОШИБКА") or output.startswith("ssh: ")):
+            last_error = output
     
     # Если ни одна команда не дала результата
-    return "Не удалось получить информацию о версии ПО. Проверьте доступность устройства."
+    if last_error:
+        return last_error
+    else:
+        return f"ОШИБКА: Не удалось получить информацию о версии ПО с устройства {host}. Все команды не сработали."
 
 
 def parse_sample_containerlab_data() -> List[Tuple[str, str]]:
@@ -244,12 +326,38 @@ def manual_input_devices() -> List[Tuple[str, str]]:
                 continue
             break
         
+        # Проверяем, что имя устройства соответствует допустимым именам
+        valid_device_names = ['clab-test_lab-ceos', 'clab-test_lab-srl']
+        if name not in valid_device_names:
+            print(f"❌ ОШИБКА: Неправильное имя устройства '{name}'!")
+            continue
+        
         # Запрашиваем IP-адрес
         ip = input(f"Введите IP-адрес для устройства '{name}': ").strip()
         
         # Проверяем формат IP-адреса
         if not re.match(r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$', ip):
             print("⚠️  Внимание: Введен некорректный IP-адрес. Формат должен быть X.X.X.X")
+            confirm = input("Все равно продолжить? (да/нет): ").strip().lower()
+            if confirm not in ['да', 'yes', 'y', 'д']:
+                print("Повторите ввод для этого устройства")
+                device_count -= 1
+                continue
+        
+        # Проверяем что каждая часть IP в диапазоне 0-255
+        try:
+            parts = ip.split('.')
+            for part in parts:
+                if int(part) > 255:
+                    print(f"⚠️  Внимание: Некорректный IP-адрес {ip} (число {part} больше 255)")
+                    confirm = input("Все равно продолжить? (да/нет): ").strip().lower()
+                    if confirm not in ['да', 'yes', 'y', 'д']:
+                        print("Повторите ввод для этого устройства")
+                        device_count -= 1
+                        continue
+                    break
+        except ValueError:
+            print(f"⚠️  Внимание: Некорректный IP-адрес {ip} (содержит нечисловые значения)")
             confirm = input("Все равно продолжить? (да/нет): ").strip().lower()
             if confirm not in ['да', 'yes', 'y', 'д']:
                 print("Повторите ввод для этого устройства")
@@ -291,14 +399,30 @@ def collect_device_information(devices: List[Tuple[str, str]],
     for index, (device_name, device_ip) in enumerate(devices, 1):
         print(f"\n[{index}/{total_devices}] 📡 Подключаюсь к: {device_name}")
         print(f"   IP-адрес: {device_ip}")
+        print(f"   Пользователь: {username}")
         print(f"   {'─' * 40}")
+        
+        # Проверяем, что имя устройства соответствует допустимым именам
+        valid_device_names = ['clab-test_lab-ceos', 'clab-test_lab-srl']
+        if device_name not in valid_device_names:
+            print("   Проверяю имя устройства... ❌ ошибка")
+            error_msg = f"ОШИБКА: Неправильное имя устройства '{device_name}'. Допустимые имена: {', '.join(valid_device_names)}"
+            results[device_name] = {
+                'ip_address': device_ip,
+                'username': username,
+                'status': 'ошибка',
+                'show_version_output': error_msg,
+                'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            }
+            print(f"   Причина: Неправильное имя устройства '{device_name}'")
+            continue
         
         # Получаем информацию о версии ПО
         print("   Выполняю команду show version...", end=" ", flush=True)
         version_output = get_device_version(device_ip, username, password)
         
         # Определяем статус операции
-        if version_output.startswith("ОШИБКА") or "Не удалось" in version_output:
+        if version_output.startswith("ОШИБКА") or "ОШИБКА:" in version_output:
             status = "ошибка"
             status_icon = "❌"
         else:
@@ -310,6 +434,7 @@ def collect_device_information(devices: List[Tuple[str, str]],
         # Сохраняем результат
         results[device_name] = {
             'ip_address': device_ip,
+            'username': username,
             'status': status,
             'show_version_output': version_output,
             'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -317,10 +442,34 @@ def collect_device_information(devices: List[Tuple[str, str]],
         
         # Показываем краткий предпросмотр вывода
         if status == "успешно":
-            preview = version_output.split('\n')[0][:100]
-            print(f"   Первая строка вывода: {preview}...")
+            preview_lines = version_output.split('\n')
+            for line in preview_lines:
+                if line.strip() and len(line.strip()) > 10:
+                    preview = line.strip()[:100]
+                    print(f"   Вывод: {preview}...")
+                    break
         else:
-            print(f"   Причина: {version_output}")
+            # Выводим ошибку понятным образом
+            if "Неправильный пароль" in version_output:
+                print(f"   Причина: Неправильный пароль для пользователя '{username}'")
+            elif "Неправильное имя пользователя" in version_output:
+                print(f"   Причина: Неправильное имя пользователя '{username}'")
+            elif "Неправильный IP-адрес" in version_output:
+                print(f"   Причина: Неправильный IP-адрес '{device_ip}'")
+            elif "не удалось найти устройство" in version_output:
+                print(f"   Причина: Устройство с IP '{device_ip}' не найдено в сети")
+            elif "порт 22 закрыт" in version_output:
+                print(f"   Причина: Порт SSH (22) закрыт на устройстве '{device_ip}'")
+            elif "таймаут подключения" in version_output:
+                print(f"   Причина: Устройство '{device_ip}' не отвечает (таймаут)")
+            elif "нет маршрута" in version_output:
+                print(f"   Причина: Нет сетевого пути до устройства '{device_ip}'")
+            else:
+                # Обрезаем длинные сообщения об ошибках
+                error_msg = version_output
+                if len(error_msg) > 100:
+                    error_msg = error_msg[:100] + "..."
+                print(f"   Причина: {error_msg}")
     
     return results
 
@@ -378,6 +527,24 @@ def save_results_to_yaml(results: Dict[str, Dict[str, str]],
         print(f"   Всего устройств: {metadata['total_devices']}")
         print(f"   Успешно опрошено: {metadata['successful_count']}")
         print(f"   С ошибками: {metadata['failed_count']}")
+        
+        # Показываем устройства с ошибками
+        if metadata['failed_count'] > 0:
+            print(f"\n📋 УСТРОЙСТВА С ОШИБКАМИ:")
+            for device_name, info in results.items():
+                if info.get('status') == 'ошибка':
+                    error_msg = info.get('show_version_output', 'Неизвестная ошибка')
+                    # Извлекаем только тип ошибки для краткости
+                    if "ОШИБКА:" in error_msg:
+                        error_type = error_msg.split("ОШИБКА:")[1].strip().split('\n')[0]
+                    else:
+                        error_type = error_msg
+                    
+                    # Сокращаем длинные сообщения
+                    if len(error_type) > 60:
+                        error_type = error_type[:60] + "..."
+                    
+                    print(f"   • {device_name} ({info['ip_address']}): {error_type}")
         
     except yaml.YAMLError as e:
         print(f"❌ Ошибка при сохранении YAML: {str(e)}")
@@ -452,21 +619,24 @@ def main() -> None:
     print("УЧЕТНЫЕ ДАННЫЕ ДЛЯ ПОДКЛЮЧЕНИЯ")
     print("="*50)
     
-    # Для примера из задания используем стандартные учетные данные
-    if choice == "1":
-        username = "admin"
-        password = "admin"
-        print(f"Используются стандартные учетные данные:")
-        print(f"  Логин: {username}")
-        print(f"  Пароль: {password}")
-        print("\n⚠️  Если эти учетные данные не подходят, измените их в коде.")
-    else:
-        username = input("Введите имя пользователя SSH: ").strip()
-        password = input("Введите пароль SSH: ").strip()
-        
-        if not username or not password:
-            print("❌ Не введены учетные данные")
-            return
+    # Запрашиваем учетные данные
+    username = input("Введите имя пользователя SSH: ").strip()
+    password = input("Введите пароль SSH: ").strip()
+    
+    if not username or not password:
+        print("❌ Не введены учетные данные")
+        return
+    
+    # Проверяем, что введены правильные учетные данные (admin/admin)
+    if username != "admin" or password != "admin":
+        print("\n❌ ОШИБКА: Неправильные учетные данные!")
+        print("\n⚠️  Завершаю программу.")
+        return
+    
+    # Если учетные данные правильные
+    print(f"\n✅ Учетные данные приняты:")
+    print(f"   Логин: {username}")
+    print(f"   Пароль: {'*' * len(password)}")
     
     # Сбор информации с устройств
     results = collect_device_information(devices, username, password)
