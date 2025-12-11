@@ -655,6 +655,26 @@ def main() -> None:
         status_icon = "✅" if info['status'] == 'успешно' else "❌"
         print(f"{status_icon} {device_name} ({info['ip_address']}): {info['status']}")
 
+def get_version_command():
+    """
+    Возвращает команду для получения информации о версии.
+    Поскольку тип устройства неизвестен, возвращаем наиболее универсальную команду.
+    """
+    # Список возможных команд для получения информации о версии
+    version_commands = [
+        "show version",           # Стандартная команда для Cisco, Arista
+        "show version | no-more", # Для устройств с пагинацией (Nokia SR Linux)
+        "show ver",               # Сокращенная форма
+        "display version",        # Для Huawei оборудования
+        "version",                # Альтернативная команда 
+        "cat /etc/os-release",    # Для Linux-подобных систем
+    ]
+    
+    selected_command = version_commands[0]  
+    
+    return selected_command
+
+
 
 if __name__ == "__main__":
     """
@@ -665,6 +685,8 @@ if __name__ == "__main__":
     """
     try:
         main()
+        command_to_execute = get_version_command()
+        print(f"Полученная команда: {command_to_execute}")
     except KeyboardInterrupt:
         print("\n\n⏹️  Программа прервана пользователем")
     except Exception as e:
