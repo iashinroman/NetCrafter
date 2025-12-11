@@ -1,0 +1,55 @@
+from netmiko import ConnectHandler
+from netmiko.ssh_autodetect import SSHDetect
+from netmiko.exceptions import NetmikoTimeoutException, NetmikoAuthenticationException
+from paramiko.ssh_exception import SSHException
+
+def detect_device_type(host, username, key_file, port=22):
+    device = {
+        "device_type": "autodetect",
+        "host": host,
+        "username": username,
+        "port": port,
+        "use_keys": True,          # использовать ключ
+        "key_file": key_file,      # путь к приватному ключу, например "~/.ssh/id_rsa"
+        "allow_agent": True,       # можно использовать ssh-agent, если есть
+        "password": "NokiaSrl1!",            # пароля нет
+    }
+
+    try:
+        guesser = SSHDetect(**device)
+        best_match = guesser.autodetect()
+        print("best_match:", best_match)
+        print("potential_matches:", guesser.potential_matches)
+        return best_match
+    except NetmikoAuthenticationException as e:
+        print(f"Ошибка аутентификации: {e}")
+    except NetmikoTimeoutException as e:
+        print(f"Таймаут подключения: {e}")
+    except SSHException as e:
+        print(f"SSH ошибка: {e}")
+    except Exception as e:
+        print(f"Другая ошибка: {repr(e)}")
+    return None
+
+def connect_with_detected_type(host, username, key_file, password, port=22):
+    params = {
+        "device_type": "autodetect",
+        "host": host,
+        "username": username,
+        "port": port,
+        "use_keys": True,
+        "key_file": key_file,
+        "allow_agent": True,
+        "password": password,
+    }
+    conn = ConnectHandler(**params)
+    output = conn.send_command('show version')
+    print(output)
+    return conn
+
+if __name__ == "__main__":
+    host = "172.20.20.4"
+    username = "admin"
+    key_file = "~/.ssh/id_ed25519"
+
+    conn = connect_with_detected_type(host, username, key_file)
